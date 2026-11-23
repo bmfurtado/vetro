@@ -159,7 +159,7 @@ const app = (id, removable = true, system = false) => ({ id, removable, system }
     assert.equal(t.reserved, '3201910019365');
     assert.equal(await k.learn('vetrotvapp'), false, 'Vetro itself is never learned');
     assert.equal(await k.learn('x; reboot'), false);
-    assert.deepEqual(Object.keys(k.summary()).sort(), ['enabled', 'history', 'last', 'packages']);
+    assert.deepEqual(Object.keys(k.summary()).sort(), ['enabled', 'history', 'last', 'packages', 'sourceKey']);
 
     // A switch-off that arrives while a run is in flight is not lost: the run after it takes Vetro's ids out again.
     t = tv({ rows: { MCmYXNxgcu: '3201901017640' }, reserved: '3201712015358' });
@@ -171,5 +171,34 @@ const app = (id, removable = true, system = false) => ({ id, removable, system }
     await inFlight;
     assert.equal(t.reserved, '3201712015358', 'owned ids left although the first run had written them');
     assert.deepEqual(k.state(), { enabled: false, owned: 0 });
+    // Tizen 9 G9: explicit field selection survives writes and preserves Samsung's own IDs.
+    const modernPath = fresh();
+    fs.writeFileSync(modernPath, JSON.stringify({enabled:true, sourceKey:'RESERVED_20',
+        packages:['MCmYXNxgcu'], storeIds:{MCmYXNxgcu:'3201901017640'}, owned:[], history:[]}));
+    const legacyOwned = JSON.parse(fs.readFileSync(modernPath));
+    legacyOwned.owned = ['111299001912']; // previously owned in RESERVED_19, not in this field
+    fs.writeFileSync(modernPath, JSON.stringify(legacyOwned));
+    let modernValue = '111299001912', modernCommands = [];
+    const modernExecute = async cmd => {
+        const sh = Buffer.from(cmd.split(' ')[1], 'base64').toString();
+        modernCommands.push(sh);
+        if (sh.includes('WASConfigTable')) {
+            assert.ok(sh.includes('RESERVED_20'));
+            assert.ok(!sh.includes('RESERVED_19'), 'do not write the older firmware field');
+            const write = /VALUES\('RESERVED_20','([^']*)'\)/.exec(sh);
+            if (write) modernValue = write[1];
+            return {exit_code:0, stdout:'C|' + modernValue + '\n'};
+        }
+        return {exit_code:0, stdout:''};
+    };
+    const modern = new KeepRemoved(modernExecute, {path:modernPath});
+    await modern.check();
+    assert.equal(modernValue, '111299001912,3201901017640');
+    assert.equal(new KeepRemoved(modernExecute,{path:modernPath}).read().sourceKey,'RESERVED_20');
+    modern.setEnabled(false); await modern.check();
+    assert.equal(modernValue,'111299001912', 'undo only Vetro-owned IDs in the selected field');
+    assert.equal(M.sourceKey(), 'RESERVED_19', 'existing devices keep their field');
+    assert.throws(() => M.sourceWriteScript(['1'], 'RESERVED_21'), /Unsupported/);
+    assert.throws(() => M.sourceReadScript([], "x'; DROP TABLE widgetinfo;--"), /Unsupported/);
     console.log('PASS keep-removed: store ids recorded in RESERVED_19 (Samsung entries kept), backstop uninstalls and logs, unlisted/system/Vetro never touched');
 })().catch(e => { console.error(e); process.exit(1); });
