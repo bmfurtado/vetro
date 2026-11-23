@@ -2369,7 +2369,6 @@ namespace Launcher
             _pendingLaunch = e;
         }
 
-        private const string SourceIconDir = "/usr/apps/com.samsung.tv.theme-resource/shared/res/org.tizen.menu/Settings_Popup/device_icon/";
 
         /// <summary>
         /// Switches input the way Samsung's own Source tile does (CompSource, SourceChangeViaTVViewer):
@@ -2383,9 +2382,8 @@ namespace Launcher
             {
                 if (Efl.app_control_create(out ac) != 0) { Log("source: app_control_create failed"); return; }
                 string n = e.SourceType.ToString();
-                // 33 is a monitor's DisplayPort (#215); the firmware's theme has a DisplayPort device icon (r_icon_device_s_dpport, seen in the Q80A image).
-                string icon = SourceIconDir + (e.SourceType >= 13 && e.SourceType <= 16 ? "r_icon_device_s_hdmi" + (e.SourceType - 12)
-                    : e.SourceType == 33 ? "r_icon_device_s_dpport" : "r_icon_device_s_tv") + ".png";
+                string icon = SourceIcon.Resolve(e.SourceType, File.Exists);
+                if (icon == null) { Log("source: no installed icon for " + n); return; }
                 Efl.app_control_set_app_id(ac, "org.tizen.tv-viewer");
                 Efl.app_control_add_extra_data(ac, "change_source", n);
                 Efl.app_control_add_extra_data(ac, "sourceType", n);

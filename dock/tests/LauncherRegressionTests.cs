@@ -22,6 +22,14 @@ namespace Launcher.Tests
 
         public static void Run()
         {
+            T.Run("source icons: legacy TV PNGs and monitor SVGs", () =>
+            {
+                T.True(SourceIcon.Resolve(13, p => p.EndsWith(".png")).EndsWith("r_icon_device_s_hdmi1.png"), "legacy HDMI icon retained");
+                T.True(SourceIcon.Resolve(33, p => p.EndsWith(".svg")).EndsWith("i_icon_device_m_dpport.svg"), "G9 DisplayPort SVG selected");
+                T.True(SourceIcon.Resolve(13, p => p.EndsWith(".svg")).EndsWith("i_icon_device_m_hdmi1.svg"), "G9 HDMI SVG selected");
+                T.True(SourceIcon.Resolve(33, p => true).EndsWith(".png"), "existing PNG preferred");
+                T.Eq(SourceIcon.Resolve(33, p => false), null, "missing icons do not yield an invalid path");
+            });
             T.Run("raw navigation: immediate presses, delayed echoes, aliases, stale counts and hidden dock", () =>
             {
                 var nav = new NavigationInput();
