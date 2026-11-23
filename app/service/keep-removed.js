@@ -31,6 +31,13 @@ var PKG_DB = '/opt/dbspace/.pkgmgr_parser.db';
 var WAS_DB = '/opt/dbspace/.webappservice.db';
 var WAS_BACKUP = '/opt/usr/home/owner/share/vetro-webappservice.db.bak';
 var KEY = 'RESERVED_19';
+// G9 Tizen 9 uses RESERVED_20 in both CTWebAppInstaller and CAppSyncList.
+// Explicit opt-in: do not guess from the presence of a generic reserved DB row.
+function sourceKey(key) {
+    if (key === undefined) return KEY;
+    if (key !== 'RESERVED_19' && key !== 'RESERVED_20') throw Error('Unsupported uninstall exclusion field');
+    return key;
+}
 var ID = /^[A-Za-z0-9_.-]{1,64}$/;
 var NEVER = /^vetrotvapp(\.|$)/;
 var OWNER_UID = 5001;   // owner on the Q80A (/etc/passwd of the firmware); the database is chowned back to it
@@ -62,11 +69,12 @@ function parseInstalled(text) {
         .map(function (f) { return { packageId: f[1], removable: f[2] === 'true', system: f[3] === 'true' }; });
 }
 
-// M|<package>|<store id> per listed package Samsung knows (store apps only), then C|<RESERVED_19>.
-function sourceReadScript(list) {
+// M|<package>|<store id> per listed package Samsung knows, then C|<selected exclusion list>.
+function sourceReadScript(list, key) {
+    key = sourceKey(key);
     var lines = [];
     if (list.length) lines.push('sqlite3 -readonly ' + WAS_DB + ' "SELECT \'M|\'||pkgname||\'|\'||id FROM widgetinfo WHERE install_type!=\'user\' AND pkgname IN (' + quoted(list) + ');" || exit 1');
-    lines.push('v=$(sqlite3 -readonly ' + WAS_DB + ' "SELECT value FROM WASConfigTable WHERE name=\'' + KEY + '\';") || exit 1', 'echo "C|$v"');
+    lines.push('v=$(sqlite3 -readonly ' + WAS_DB + ' "SELECT value FROM WASConfigTable WHERE name=\'' + key + '\';") || exit 1', 'echo "C|$v"');
     return lines.join('\n');
 }
 
@@ -89,15 +97,16 @@ function plan(current, listedIds, ownedBefore) {
     return { want: want, owned: owned };
 }
 
-function sourceWriteScript(ids) {
+function sourceWriteScript(ids, key) {
+    key = sourceKey(key);
     var v = ids.join(',');
     if (!/^[A-Za-z0-9_.,-]*$/.test(v)) throw Error('Unsafe store id list');
     return [
         'set -e',
         '[ -f ' + WAS_BACKUP + ' ] || cp -p ' + WAS_DB + ' ' + WAS_BACKUP,
-        'sqlite3 ' + WAS_DB + ' "INSERT OR REPLACE INTO WASConfigTable(name,value) VALUES(\'' + KEY + '\',\'' + v + '\');"',
+        'sqlite3 ' + WAS_DB + ' "INSERT OR REPLACE INTO WASConfigTable(name,value) VALUES(\'' + key + '\',\'' + v + '\');"',
         'chown ' + OWNER_UID + ':users ' + WAS_DB + ' ' + WAS_DB + '-journal 2>/dev/null || true',
-        'echo "C|$(sqlite3 -readonly ' + WAS_DB + ' "SELECT value FROM WASConfigTable WHERE name=\'' + KEY + '\';")"'
+        'echo "C|$(sqlite3 -readonly ' + WAS_DB + ' "SELECT value FROM WASConfigTable WHERE name=\'' + key + '\';")"'
     ].join('\n');
 }
 
@@ -114,13 +123,16 @@ function KeepRemoved(execute, opts) {
 
 KeepRemoved.prototype.read = function () {
     // On until the user switches it off: with an empty list nothing is read from or written to Samsung's database.
-    var s = { enabled: true, packages: [], storeIds: {}, owned: [], history: [] };
+    var s = { enabled: true, sourceKey: KEY, packages: [], storeIds: {}, owned: [], history: [] };
     try {
         var j = JSON.parse(fs.readFileSync(this.path, 'utf8'));
         s.enabled = j.enabled !== false;
+        s.sourceKey = sourceKey(j.sourceKey);
         s.packages = clean(j.packages);
         Object.keys(j.storeIds || {}).forEach(function (p) { if (ID.test(p) && ID.test(String(j.storeIds[p]))) s.storeIds[p] = String(j.storeIds[p]); });
-        s.owned = splitIds((Array.isArray(j.owned) ? j.owned : []).join(','));
+        // Ownership belongs to one field; a deliberate field change must not adopt
+        // the previous field's IDs as ours in the new list.
+        s.owned = sourceKey(j.ownedKey) === s.sourceKey ? splitIds((Array.isArray(j.owned) ? j.owned : []).join(',')) : [];
         s.history = Array.isArray(j.history) ? j.history.slice(-50) : [];
     } catch (e) { /* no file yet */ }
     return s;
@@ -128,7 +140,7 @@ KeepRemoved.prototype.read = function () {
 
 KeepRemoved.prototype.write = function (s) {
     var tmp = this.path + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ enabled: s.enabled === true, packages: s.packages, storeIds: s.storeIds, owned: s.owned, history: s.history.slice(-50) }, null, 1), { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify({ enabled: s.enabled === true, sourceKey: sourceKey(s.sourceKey), ownedKey: sourceKey(s.sourceKey), packages: s.packages, storeIds: s.storeIds, owned: s.owned, history: s.history.slice(-50) }, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, this.path);
 };
 
@@ -144,7 +156,7 @@ KeepRemoved.prototype.state = function () { var s = this.read(); return { enable
 // What the dashboard shows.
 KeepRemoved.prototype.summary = function () {
     var s = this.read();
-    return { enabled: s.enabled, packages: s.packages, last: this.last, history: s.history };
+    return { enabled: s.enabled, sourceKey: s.sourceKey, packages: s.packages, last: this.last, history: s.history };
 };
 
 // action: 'add' | 'remove' | 'set' on the list. Returns the new list. The list is kept while the switch is off.
@@ -172,7 +184,7 @@ KeepRemoved.prototype.learn = function (packageId) {
     var self = this, list;
     try { list = clean([packageId]); } catch (e) { return Promise.resolve(false); }
     if (!this.read().enabled) return Promise.resolve(false);
-    return this.execute(wrap(sourceReadScript(list)), 15000).then(function (r) {
+    return this.execute(wrap(sourceReadScript(list, this.read().sourceKey)), 15000).then(function (r) {
         var src = parseSource(r.stdout), id = src.map[list[0]];
         if (r.exit_code || r.timed_out || !id) return false;
         var s = self.read();
@@ -186,7 +198,7 @@ KeepRemoved.prototype.learn = function (packageId) {
 KeepRemoved.prototype.sync = function () {
     var self = this, s = this.read(), listed = s.enabled ? s.packages : [];
     if (!listed.length && !s.owned.length) return Promise.resolve({ ids: null, changed: false });
-    return this.execute(wrap(sourceReadScript(listed)), 15000).then(function (r) {
+    return this.execute(wrap(sourceReadScript(listed, s.sourceKey)), 15000).then(function (r) {
         var src = parseSource(r.stdout);
         if (r.exit_code || r.timed_out || !src.current) throw Error('Samsung app registry unavailable');
         // A store id, once seen, is remembered: the sync must keep skipping the app even if its row goes.
@@ -197,9 +209,9 @@ KeepRemoved.prototype.sync = function () {
         // Merge into the state as it is now: the switch or the list may have changed while the TV was being read.
         var save = function () { var cur = self.read(); cur.storeIds = Object.assign({}, cur.storeIds, storeIds); cur.owned = pl.owned; self.write(cur); };
         if (pl.want.join(',') === src.current.join(',')) { save(); return { ids: pl.want, changed: false }; }
-        return self.execute(wrap(sourceWriteScript(pl.want)), 15000).then(function (w) {
+        return self.execute(wrap(sourceWriteScript(pl.want, s.sourceKey)), 15000).then(function (w) {
             var got = parseSource(w.stdout).current;
-            if (w.exit_code || !got || got.join(',') !== pl.want.join(',')) throw Error(KEY + ' not written');
+            if (w.exit_code || !got || got.join(',') !== pl.want.join(',')) throw Error(s.sourceKey + ' not written');
             save();
             return { ids: pl.want, changed: true };
         });
@@ -250,6 +262,6 @@ KeepRemoved.prototype.check = function () {
 };
 
 module.exports = {
-    KeepRemoved: KeepRemoved, installedScript: installedScript, parseInstalled: parseInstalled, clean: clean,
+    KeepRemoved: KeepRemoved, sourceKey: sourceKey, installedScript: installedScript, parseInstalled: parseInstalled, clean: clean,
     sourceReadScript: sourceReadScript, parseSource: parseSource, plan: plan, sourceWriteScript: sourceWriteScript, STORE: STORE, KEY: KEY
 };
