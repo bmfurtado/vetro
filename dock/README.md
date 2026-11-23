@@ -82,3 +82,17 @@ into `app/native/dock/`. The package builder reads those copies; it does not com
 After changing native sources, rebuild before packaging. Run `dotnet run --project dock/tests` for the
 pure logic, raw-input echo, Home guard cancellation and system-launch fallback checks (the shell
 fixtures run on a Unix desktop and never access a TV).
+
+### Ultrawide volume placement
+
+Samsung's G9 OLED exposes a 1920×1080 EFL screen on a 3840×1080 compositor output.
+Its `base_output_resolution` and `alignment_for_base_outp` transforms preserve the
+pill's size but shift it into the centre 16:9 region. When a side pill is first built,
+Vetro reads the launcher's transforms with `enlightenment_info` (500 ms timeout) and
+compensates the horizontal centring offset: outward to the left or right. Contents
+stay in their original local coordinates. Top, Bottom, ordinary screens, explicit
+screen sizes that do not match, and unrecognised transforms keep their existing layout.
+An unavailable probe also keeps the existing layout and logs the fallback.
+
+Verified on the G9 using the compositor's hardware-plane destinations, including all
+four edges. The geometry/parser regressions run with the other dock tests.
